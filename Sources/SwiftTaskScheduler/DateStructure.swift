@@ -16,7 +16,7 @@ internal struct DateStructure {
     let seconds: Int
 }
 
-extension DateStructure {
+internal extension DateStructure {
     func with(hours: Int, minutes: Int, seconds: Int) -> DateStructure {
         DateStructure(
             year: self.year, month: self.month, day: self.day, weekday: self.weekday,
@@ -24,13 +24,13 @@ extension DateStructure {
         )
     }
     
-    func isTimeInDate(_ time: ExecutionTime) -> Bool {
+    func isInclude(time: ExecutionTime) -> Bool {
         return time.hours - self.hours > 0 || (time.hours - self.hours == 0 && time.minutes - self.minutes > 0)
         || (time.hours - self.hours == 0 && time.minutes - self.minutes == 0 && time.seconds - self.seconds > 0)
     }
 }
 
-extension DateStructure {
+internal extension DateStructure {
     func asDate(_ calendar: Calendar) -> Date {
         calendar.date(
             from: .init(

@@ -1,3 +1,4 @@
+/// Represents the day of the week on which the task is scheduled to run.
 public enum ExecutionDay: Int, CaseIterable {
     case sunday    = 1
     case monday    = 2

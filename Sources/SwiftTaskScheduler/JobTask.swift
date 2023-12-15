@@ -1,57 +1,89 @@
+import Dispatch
 import Foundation
 
+/// A task to perform actions according to the schedule, established by the execution strategy.
 public final class JobTask {
-    
-    public enum JobTaskState {
+    public enum State: Int, Codable {
         case working
         case suspended
+        case completed
+        case destroyed
     }
     
-    public let id: String
+    public enum Error: Swift.Error {
+        case resumeDestroyedTask
+    }
     
-    public private(set) var state: JobTaskState
+    /// Unique identifier.
+    public let id: UUID
     
+    /// Tag (can be assigned to a group of tasks).
+    public let tag: String
+    
+    /// Task execution state.
+    public private(set) var state: State
+    
+    /// Next execution date, if the status is not equals completed, otherwise nil.
     public private(set) var nextExecutionDate: Date?
     
+    /// Task execution strategy.
     public private(set) var strategy: ExecutionStrategy
     
     private let action: (JobTask) -> Void
     
     private let timer: DispatchSourceTimer
     
-    private let calculator: ExecutionDateCalculator
+    private let calendar: Calendar
     
-    private weak var scheduler: TaskScheduler?
+    private var calculator: ExecutionDateCalculator
     
-    internal init(
+    private var scheduler: TaskScheduler?
+    
+    /// Creates a new `JobTask`.
+    ///
+    /// - Parameters:
+    ///     - id: Unique task identifier in UUID format. Defaults to generated UUID value.
+    ///     - tag: A tag for combining several tasks into a single semantic group. Defaults to empty string.
+    ///     - scheduler: Scheduler for storing and managing tasks.
+    ///     - state: Initial task state. Defaults `working`.
+    ///     - queue: The queue on which the task will be executed.
+    ///     - strategy: Execution strategy of task.
+    ///     - action: Action that will be performing when task is running.
+    public init(
+        id: UUID = UUID(),
+        tag: String = "",
         scheduler: TaskScheduler,
+        state: State = .working,
         queue: DispatchQueue = .global(qos: .default),
         strategy: ExecutionStrategy,
         action: @escaping (JobTask) -> Void
     ) {
+        self.id = id
+        self.tag = tag
+        self.state = state
         self.action = action
-        self.id = UUID().uuidString
-        self.state = .suspended
         self.strategy = strategy
+        self.scheduler = scheduler
+        self.calendar = .init(identifier: .gregorian)
         self.timer = DispatchSource.makeTimerSource(queue: queue)
-        self.calculator = ExecutionDateCalculator(for: strategy)
+        self.calculator = ExecutionDateCalculator(for: strategy, calendar: self.calendar)
         
-        timer.setEventHandler { [weak self] in
+        self.timer.setEventHandler { [weak self] in
             guard let me = self else { return }
             me.timerFireAction()
         }
         
-        scheduleNextTimerFire()
+        if self.state == .working {
+            self.scheduleNextTimerFire()
+            self.timer.resume()
+        }
         
-        timer.resume()
-        
-        scheduler.addTask(self)
+        self.scheduler!.addTask(self)
     }
     
     private func timerFireAction() {
         if strategy.type == .once {
-            suspend()
-            nextExecutionDate = nil
+            complete()
         } else {
             scheduleNextTimerFire()
         }
@@ -63,93 +95,66 @@ public final class JobTask {
         timer.schedule(deadline: .now() + nextExecutionDate!.timeIntervalSince(Date()))
     }
     
-    // MARK: ONCE
-    
-    public static func once(_ time: ExecutionTime, action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.once(time)), action: action)
-    }
-    
-    public static func once(_ time: ExecutionTime, action: @escaping () -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.once(time)), action: { (_) in action() })
-    }
-    
-    // MARK: REPEATABLE
-    
-    public static func start(_ time: ExecutionTime, repeatEvery: TimeInterval, action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.repeatable(time, repeatEvery)), action: action)
-    }
-    
-    public static func start(_ time: ExecutionTime, repeatEvery: TimeInterval, action: @escaping () -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.repeatable(time, repeatEvery)), action: { (_) in action() })
-    }
-    
-    // MARK: EVERYDAY
-    
-    public static func everyday(time: ExecutionTime..., action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask.every(days: ExecutionDay.allCases, time: time, action: action)
-    }
-    
-    public static func everyday(time: ExecutionTime..., action: @escaping () -> Void) -> JobTask {
-        return JobTask.every(days: ExecutionDay.allCases, time: time, action: { (_) in action() })
-    }
-    
-    // MARK: WEEKENDS
-    
-    public static func weekends(time: ExecutionTime..., action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.weekdays([.sunday, .saturday], time)), action: action)
-    }
-    
-    public static func weekends(time: ExecutionTime..., action: @escaping () -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.weekdays([.sunday, .saturday], time)), action: { (_) in action() })
-    }
-    
-    // MARK: WEEKDAYS
-    
-    public static func every(_ days: ExecutionDay..., time: ExecutionTime..., action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask.every(days: days, time: time, action: action)
-    }
-    
-    public static func every(_ days: ExecutionDay..., time: ExecutionTime..., action: @escaping () -> Void) -> JobTask {
-        return JobTask.every(days: days, time: time, action: { (_) in action() })
-    }
-    
-    private static func every(days: [ExecutionDay], time: [ExecutionTime] = [.midnight], action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.weekdays(days, time)), action: action)
-    }
-    
-    // MARK: DATES
-    
-    public static func every(_ dates: Int..., time: ExecutionTime..., action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask.every(dates: dates, time: time, action: action)
-    }
-    
-    public static func every(_ dates: Int..., time: ExecutionTime..., action: @escaping () -> Void) -> JobTask {
-        return JobTask.every(dates: dates, time: time, action: { (_) in action() })
-    }
-    
-    private static func every(dates: [Int], time: [ExecutionTime] = [.midnight], action: @escaping (JobTask) -> Void) -> JobTask {
-        return JobTask(scheduler: .default, strategy: .init(.dates(dates, time)), action: action)
-    }
-    
-    // start?
-    // set task scheduler!
-    
-    public func resume() {
-        if state == .working {
-            return
+    private func needRescheduleTimerFire() -> Bool {
+        guard let nextExecutionDate = self.nextExecutionDate else {
+            return true
         }
-        // check strategy, remove task if not actual?
-        // or check next execution date
-        // get new, and reschedule timer
-        state = .working
-        timer.resume()
+        let now = Date().asDateStructure(calendar)
+        let executionTime = nextExecutionDate.time
+        let dateContains = strategy.type == .daysOfMonth ? strategy.daysOfMonth.contains(now.day) : true
+        let weekdayContains = strategy.type == .daysOfWeek ? strategy.daysOfWeek.contains(now.weekday) : true
+        
+        return !(dateContains && weekdayContains && now.isInclude(time: executionTime))
     }
     
+    /// Change current execution strategy to new.
+    ///
+    ///  - Parameter strategy: New execution strategy.
+    public func setNewExecutionStrategy(_ strategy: ExecutionStrategy) {
+        self.strategy = strategy
+        self.calculator = ExecutionDateCalculator(for: self.strategy, calendar: self.calendar)
+        scheduleNextTimerFire()
+    }
+    
+    private func complete() {
+        timer.suspend()
+        state = .completed
+        nextExecutionDate = nil
+    }
+    
+    /// Suspend a task execution.
     public func suspend() {
-        if state == .suspended {
-            return
-        }
+        if state == .suspended { return }
         state = .suspended
         timer.suspend()
+    }
+    
+    /// Resume a task execution.
+    ///
+    /// Throws: Self.Error.resumeDestroyedTask - if task is destroyed.
+    public func resume() throws {
+        switch state {
+        case .destroyed:
+            throw Self.Error.resumeDestroyedTask
+        case .working:
+            return
+        case .suspended, .completed:
+            if needRescheduleTimerFire() {
+                scheduleNextTimerFire()
+            }
+            state = .working
+            timer.resume()
+        }
+    }
+    
+    /// Cancel a task execution, and remove current task from scheduler.
+    public func destroy() {
+        if state == .destroyed { return }
+        timer.cancel()
+        if let scheduler = self.scheduler {
+            scheduler.removeTask(by: id)
+            self.scheduler = nil
+        }
+        state = .destroyed
     }
 }
